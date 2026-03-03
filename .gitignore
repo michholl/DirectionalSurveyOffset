@@ -1,0 +1,13 @@
+# Data files (large)
+DS.csv
+cache.json
+.csv_hash
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
