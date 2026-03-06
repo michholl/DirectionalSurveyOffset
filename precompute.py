@@ -68,7 +68,7 @@ def vector_avg_azimuth(azimuths_deg: np.ndarray) -> float:
 
 
 def azimuth_within(azi1: float, azi2: float, tol: float) -> bool:
-    """True if azi1 is within +/-tol degrees of azi2 OR of azi2+180 (reverse)."""
+    """True if azi1 is within ±tol degrees of azi2 OR of azi2+180 (reverse)."""
     diff = (azi1 - azi2 + 180) % 360 - 180  # signed shortest angle
     if abs(diff) <= tol:
         return True
@@ -91,14 +91,14 @@ def precompute(force: bool = False):
             cached_hash = f.read().strip()
         current_hash = file_sha256(CSV_PATH)
         if cached_hash == current_hash:
-            print("Cache is up-to-date (CSV unchanged). Skipping pre-computation.")
+            print("✓ Cache is up-to-date (CSV unchanged). Skipping pre-computation.")
             return
-        print("CSV has changed -- re-computing...")
+        print("CSV has changed — re-computing...")
     else:
         if force:
-            print("Force flag set -- re-computing...")
+            print("Force flag set — re-computing...")
         else:
-            print("No cache found -- computing from scratch...")
+            print("No cache found — computing from scratch...")
 
     # ------------------------------------------------------------------
     # 1. Load CSV
@@ -111,7 +111,7 @@ def precompute(force: bool = False):
     # Validate units
     bad_uom = df[df["Uom"] != "FT"]
     if len(bad_uom) > 0:
-        print(f"  Dropping {len(bad_uom)} rows with Uom != FT")
+        print(f"  ⚠ Dropping {len(bad_uom)} rows with Uom != FT")
         df = df[df["Uom"] == "FT"].copy()
 
     # Convert UWI to string
@@ -127,18 +127,16 @@ def precompute(force: bool = False):
     df["station_lat"] = df["SufaceLatitude"] + df["DeltaLatitude"]
     df["station_lon"] = df["SurfaceLongitude"] + df["DeltaLongitude"]
 
-    # Origin = centroid of all surface locations
+    # Origin = centroid of all surface locations (kept for metadata/cache only)
     surface_locs = df.groupby("UWI").first()[["SufaceLatitude", "SurfaceLongitude"]]
     origin_lat = surface_locs["SufaceLatitude"].mean()
     origin_lon = surface_locs["SurfaceLongitude"].mean()
-    cos_origin = math.cos(math.radians(origin_lat))
 
-    # Convert to local Cartesian (feet)
-    df["x"] = (df["station_lon"] - origin_lon) * cos_origin * FT_PER_DEG
-    df["y"] = (df["station_lat"] - origin_lat) * FT_PER_DEG
+    # z coordinate only — x/y are computed per-pair at query time using the
+    # lateral midpoint as the local projection origin (see step 5).
     df["z"] = df["TVDSS"]
 
-    print(f"       Origin: ({origin_lat:.6f}, {origin_lon:.6f})  ({time.time()-t0:.1f}s)")
+    print(f"       Origin (metadata): ({origin_lat:.6f}, {origin_lon:.6f})  ({time.time()-t0:.1f}s)")
 
     # ------------------------------------------------------------------
     # 3. Identify lateral wells
@@ -154,8 +152,8 @@ def precompute(force: bool = False):
             "md": grp["MeasuredDepth"].values,
             "inc": grp["Inclination"].values,
             "azi": grp["Azimuth"].values,
-            "x": grp["x"].values,
-            "y": grp["y"].values,
+            # No pre-projected x/y — coordinates are computed on-demand per pair
+            # using the lateral midpoint as the local projection origin.
             "z": grp["z"].values,
             "station_lat": grp["station_lat"].values,
             "station_lon": grp["station_lon"].values,
@@ -169,7 +167,7 @@ def precompute(force: bool = False):
         if max_inc <= INC_THRESHOLD_DEG:
             continue
 
-        # Find first station where INC > 90
+        # Find first station where INC > 90°
         lateral_mask = w["inc"] > INC_THRESHOLD_DEG
         first_lat_idx = np.argmax(lateral_mask)
         md_start = w["md"][first_lat_idx]
@@ -189,8 +187,7 @@ def precompute(force: bool = False):
 
         laterals[uwi] = {
             "midpoint_idx": int(mid_idx),
-            "midpoint_x": float(w["x"][mid_idx]),
-            "midpoint_y": float(w["y"][mid_idx]),
+            # midpoint_x/y removed — computed fresh per-pair in step 5
             "midpoint_z": float(w["z"][mid_idx]),
             "midpoint_md": float(w["md"][mid_idx]),
             "midpoint_lat": float(w["station_lat"][mid_idx]),
@@ -210,17 +207,17 @@ def precompute(force: bool = False):
     print("\n[4/6] Building location caches...")
     t0 = time.time()
 
-    surface_cache = {}  # UWI -> (lat, lon)  -- still needed for GeoJSON
-    well_bbox = {}      # UWI -> (xmin, xmax, ymin, ymax) from all stations
+    surface_cache = {}  # UWI -> (lat, lon)  — still needed for GeoJSON
+    well_bbox = {}      # UWI -> (lat_min, lat_max, lon_min, lon_max) in degrees
     for uwi, w in wells.items():
         surface_cache[uwi] = (w["surface_lat"], w["surface_lon"])
         well_bbox[uwi] = (
-            float(np.min(w["x"])), float(np.max(w["x"])),
-            float(np.min(w["y"])), float(np.max(w["y"])),
+            float(np.min(w["station_lat"])), float(np.max(w["station_lat"])),
+            float(np.min(w["station_lon"])), float(np.max(w["station_lon"])),
         )
 
     # Also compute per-well average azimuth & max inclination for filtering.
-    # Use lateral-section azimuth (INC > 90) when available so that build-
+    # Use lateral-section azimuth (INC > 90°) when available so that build-
     # section azimuths don't skew the filter for offset wells whose surface
     # pad is far from the lateral.
     well_meta = {}
@@ -235,7 +232,7 @@ def precompute(force: bool = False):
             else:
                 avg_azi = 0.0
         else:
-            avg_azi = None  # vertical well -- will be excluded
+            avg_azi = None  # vertical well — will be excluded
         well_meta[uwi] = {"max_inc": max_inc, "avg_azi": avg_azi}
 
     print(f"       {len(surface_cache)} well locations cached  ({time.time()-t0:.1f}s)")
@@ -256,32 +253,45 @@ def precompute(force: bool = False):
             print(f"       [{i+1}/{total}] ({pct:.0f}%) processing {lat_uwi}...")
 
         avg_azi = lat_info["avg_azimuth"]
-        mx, my, mz = lat_info["midpoint_x"], lat_info["midpoint_y"], lat_info["midpoint_z"]
+        mlat = lat_info["midpoint_lat"]
+        mlon = lat_info["midpoint_lon"]
+        mz   = lat_info["midpoint_z"]
+
+        # Local projection anchored at the lateral's midpoint.
+        # cos_mid corrects east-west degrees→feet at this specific latitude.
+        cos_mid = math.cos(math.radians(mlat))
+
+        # In this local frame the midpoint is always (0, 0, mz).
+        mx = 0.0
+        my = 0.0
 
         # Plane normal: direction of average azimuth (horizontal)
         azi_rad = math.radians(avg_azi)
         nx = math.sin(azi_rad)
         ny = math.cos(azi_rad)
-        # Plane equation: nx*(x-mx) + ny*(y-my) = 0
+        # Plane equation: nx*(x-mx) + ny*(y-my) = 0  →  nx*x + ny*y = 0
 
         # Right vector (looking from toe toward heel = reverse azimuth)
         # look_dir = (-sin(A), -cos(A), 0)
-        # right = look_dir x (0,0,-1) = (-cos(A), sin(A), 0)
+        # right = look_dir × (0,0,-1) = (-cos(A), sin(A), 0)
         rx = -math.cos(azi_rad)
         ry = math.sin(azi_rad)
 
-        # Strike line segment endpoints in Cartesian (+/-SURFACE_RADIUS_FT from midpoint)
-        s1x = mx + rx * SURFACE_RADIUS_FT
-        s1y = my + ry * SURFACE_RADIUS_FT
-        s2x = mx - rx * SURFACE_RADIUS_FT
-        s2y = my - ry * SURFACE_RADIUS_FT
+        # Strike line segment endpoints in Cartesian (±SURFACE_RADIUS_FT from midpoint)
+        # midpoint is (0,0) in local frame
+        s1x = rx * SURFACE_RADIUS_FT
+        s1y = ry * SURFACE_RADIUS_FT
+        s2x = -rx * SURFACE_RADIUS_FT
+        s2y = -ry * SURFACE_RADIUS_FT
 
-        # Bounding box of the strike line, expanded by a buffer for station spacing
+        # Bounding box of the strike line in degrees (for well_bbox filter)
         STRIKE_BUFFER_FT = 500.0
-        strike_xmin = min(s1x, s2x) - STRIKE_BUFFER_FT
-        strike_xmax = max(s1x, s2x) + STRIKE_BUFFER_FT
-        strike_ymin = min(s1y, s2y) - STRIKE_BUFFER_FT
-        strike_ymax = max(s1y, s2y) + STRIKE_BUFFER_FT
+        strike_buf_lat_deg = (SURFACE_RADIUS_FT + STRIKE_BUFFER_FT) / FT_PER_DEG
+        strike_buf_lon_deg = (SURFACE_RADIUS_FT + STRIKE_BUFFER_FT) / (FT_PER_DEG * cos_mid)
+        strike_lat_min = mlat - strike_buf_lat_deg
+        strike_lat_max = mlat + strike_buf_lat_deg
+        strike_lon_min = mlon - strike_buf_lon_deg
+        strike_lon_max = mlon + strike_buf_lon_deg
 
         offsets = []
 
@@ -289,29 +299,35 @@ def precompute(force: bool = False):
             if off_uwi == lat_uwi:
                 continue
 
-            # (a) Bounding-box overlap: does the well's station footprint
-            #     overlap the strike line's bounding box?
-            bb = well_bbox[off_uwi]
-            if bb[1] < strike_xmin or bb[0] > strike_xmax:
-                continue  # no x overlap
-            if bb[3] < strike_ymin or bb[2] > strike_ymax:
-                continue  # no y overlap
+            # (a) Bounding-box overlap: does the well's station footprint (degrees)
+            #     overlap the strike line's geographic bounding box?
+            bb = well_bbox[off_uwi]  # (lat_min, lat_max, lon_min, lon_max)
+            if bb[1] < strike_lat_min or bb[0] > strike_lat_max:
+                continue  # no lat overlap
+            if bb[3] < strike_lon_min or bb[2] > strike_lon_max:
+                continue  # no lon overlap
 
-            # (b) Exclude vertical wells (max INC < 5)
+            # (b) Exclude vertical wells (max INC < 5°)
             meta = well_meta[off_uwi]
             if meta["avg_azi"] is None:
                 continue  # vertical well
 
-            # (c) Azimuth compatibility: +/-25 of target or reverse
+            # (c) Azimuth compatibility: ±25° of target or reverse
             if not azimuth_within(meta["avg_azi"], avg_azi, AZIMUTH_TOLERANCE_DEG):
                 continue
 
-            # (d) Find plane intersection -- signed distance per station
+            # (d) Project offset well stations into the lateral's local frame.
+            # Using cos_mid for both wells gives <0.1% error for wells within
+            # 20 miles of each other (typical offset well distance).
             ow = wells[off_uwi]
-            ox, oy, oz = ow["x"], ow["y"], ow["z"]
+            ox = (ow["station_lon"] - mlon) * cos_mid * FT_PER_DEG
+            oy = (ow["station_lat"] - mlat) * FT_PER_DEG
+            oz = ow["z"]
             omd = ow["md"]
 
-            signed_d = nx * (ox - mx) + ny * (oy - my)
+            # Find plane intersection — signed distance per station
+            # (mx=0, my=0 in local frame, so: signed_d = nx*ox + ny*oy)
+            signed_d = nx * ox + ny * oy
 
             # Find sign changes
             crossings = []
@@ -327,12 +343,12 @@ def precompute(force: bool = False):
             if not crossings:
                 continue
 
-            # Pick closest crossing to midpoint M
+            # Pick closest crossing to midpoint M (which is at origin 0,0 in local frame)
             best_idx = None
             best_dist3d = float("inf")
             for idx in crossings:
-                dx = ox[idx] - mx
-                dy = oy[idx] - my
+                dx = ox[idx]          # mx = 0
+                dy = oy[idx]          # my = 0
                 dz = oz[idx] - mz
                 d3d = math.sqrt(dx * dx + dy * dy + dz * dz)
                 if d3d < best_dist3d:
@@ -340,10 +356,11 @@ def precompute(force: bool = False):
                     best_idx = idx
 
             # (e) Compute gunbarrel offsets
+            # dP = Q - M; M is at origin so dP = Q
             qx, qy, qz = float(ox[best_idx]), float(oy[best_idx]), float(oz[best_idx])
-            dpx, dpy, dpz = qx - mx, qy - my, qz - mz
+            dpx, dpy, dpz = qx, qy, qz - mz
 
-            x_gun = rx * dpx + ry * dpy          # right . dP
+            x_gun = rx * dpx + ry * dpy          # right · dP
             y_gun = -(dpz)                         # positive up (shallower TVDSS)
 
             # Skip if intersection is beyond the strike line extent
@@ -367,12 +384,14 @@ def precompute(force: bool = False):
 
         results[lat_uwi] = {
             "midpoint": {
-                "x": round(mx, 2),
-                "y": round(my, 2),
+                # x/y are always 0 in the local frame (midpoint IS the origin);
+                # geographic position is fully captured by lat/lon.
+                "x": 0.0,
+                "y": 0.0,
                 "z": round(mz, 2),
                 "md": round(lat_info["midpoint_md"], 2),
-                "lat": lat_info["midpoint_lat"],
-                "lon": lat_info["midpoint_lon"],
+                "lat": mlat,
+                "lon": mlon,
             },
             "avg_azimuth": round(avg_azi, 2),
             "lateral_length": round(lat_info["lateral_length"], 2),
@@ -380,14 +399,14 @@ def precompute(force: bool = False):
             "surface_lon": lat_info["surface_lon"],
             "offset_count": len(offsets),
             "offsets": offsets,
-            # Strike line endpoints: line perpendicular to azimuth through midpoint
-            # The strike direction is the right vector (rx, ry) in local Cartesian
-            # Convert +/-SURFACE_RADIUS_FT along strike to lat/lon
+            # Strike line endpoints: line perpendicular to azimuth through midpoint.
+            # Uses the lateral's own midpoint latitude for the cosine scale —
+            # accurate regardless of where the dataset's centroid falls.
             "strike_line": {
-                "lat1": round(lat_info["midpoint_lat"] + (ry * SURFACE_RADIUS_FT) / FT_PER_DEG, 7),
-                "lon1": round(lat_info["midpoint_lon"] + (rx * SURFACE_RADIUS_FT) / (FT_PER_DEG * cos_origin), 7),
-                "lat2": round(lat_info["midpoint_lat"] - (ry * SURFACE_RADIUS_FT) / FT_PER_DEG, 7),
-                "lon2": round(lat_info["midpoint_lon"] - (rx * SURFACE_RADIUS_FT) / (FT_PER_DEG * cos_origin), 7),
+                "lat1": round(mlat + (ry * SURFACE_RADIUS_FT) / FT_PER_DEG, 7),
+                "lon1": round(mlon + (rx * SURFACE_RADIUS_FT) / (FT_PER_DEG * cos_mid), 7),
+                "lat2": round(mlat - (ry * SURFACE_RADIUS_FT) / FT_PER_DEG, 7),
+                "lon2": round(mlon - (rx * SURFACE_RADIUS_FT) / (FT_PER_DEG * cos_mid), 7),
             },
         }
 
@@ -485,7 +504,7 @@ def precompute(force: bool = False):
     print(f"       Cache saved: {CACHE_PATH} ({cache_size_mb:.1f} MB)  ({time.time()-t0:.1f}s)")
 
     total_elapsed = time.time() - t_total
-    print(f"\nPre-computation complete in {total_elapsed:.1f}s")
+    print(f"\n✅ Pre-computation complete in {total_elapsed:.1f}s")
     print(f"   {len(laterals)} laterals, {total_offsets:,} offset points cached")
     print(f"   {laterals_with_offsets} laterals have at least one offset well")
 
