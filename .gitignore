@@ -8,6 +8,12 @@ __pycache__/
 *.pyc
 .venv/
 
+# Server & docs (not deployed)
+server.py
+templates/
+reqs.md
+SPECIFICATION.md
+
 # OS
 .DS_Store
 Thumbs.db
